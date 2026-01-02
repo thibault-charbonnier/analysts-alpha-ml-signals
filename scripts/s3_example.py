@@ -1,4 +1,6 @@
 from src.alpha_in_analysts.utils.s3_utils import s3Utils
+from dotenv import load_dotenv
+load_dotenv()
 
 wrds_gq_monthly = s3Utils.pull_parquet_file_from_s3(
     path="s3://alpha-in-analysts-storage/data/wrds_gross_query_monthly.parquet"
