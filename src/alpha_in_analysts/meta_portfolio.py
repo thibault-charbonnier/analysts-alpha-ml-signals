@@ -1,4 +1,7 @@
 import polars as pl
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class MetaPortfolio:
@@ -35,7 +38,7 @@ class MetaPortfolio:
         ----------
         analyst_books : pl.DataFrame
             Polars DataFrame containing the portfolios of multiple analysts.
-            Expected columns: ['analyst_id', 'asset_id', 'weight']
+            Expected columns: ['analyst_id', 'stock_id', 'weight']
         predict_pnl : pl.DataFrame
             Polars DataFrame containing the predicted 12-month forward PnL for each analyst.
             Expected columns: ['analyst_id', 'predicted_pnl']
@@ -44,9 +47,11 @@ class MetaPortfolio:
         -------
         pl.DataFrame
             Polars DataFrame containing the aggregated meta-portfolio weights.
-            Columns: ['asset_id', 'meta_weight']
+            Columns: ['stock_id', 'meta_weight']
         """
-        analyst_cols = ["analyst_id", "asset_id", "weight"]
+        logger.info("\t\tCreating meta-portfolio using method: %s", method)
+
+        analyst_cols = ["analyst_id", "stock_id", "weight"]
         for col in analyst_cols:
             if col not in analyst_books.columns:
                 raise ValueError(f"Column '{col}' not found in analyst_books DataFrame.")
@@ -94,14 +99,14 @@ class MetaPortfolio:
         Parameters
         ----------
         analyst_books : pl.DataFrame
-            Pre-validated with columns: ['analyst_id', 'asset_id', 'weight']
+            Pre-validated with columns: ['analyst_id', 'stock_id', 'weight']
         predict_pnl : pl.DataFrame
             Pre-validated with columns: ['analyst_id', 'predicted_pnl']
         
         Returns
         -------
         pl.DataFrame
-            Columns: ['asset_id', 'meta_weight']
+            Columns: ['stock_id', 'meta_weight']
         """
         return (
             analyst_books
@@ -114,9 +119,9 @@ class MetaPortfolio:
             .with_columns(
                 (pl.col("weight") * pl.col("signal")).alias("w_raw")
             )
-            .group_by("asset_id")
+            .group_by("stock_id")
             .agg(pl.col("w_raw").sum().alias("meta_weight"))
-            .select(["asset_id", "meta_weight"])
+            .select(["stock_id", "meta_weight"])
         )
 
     def _build_paper(self, analyst_books: pl.DataFrame, predict_pnl: pl.DataFrame) -> pl.DataFrame:
@@ -135,14 +140,14 @@ class MetaPortfolio:
         Parameters
         ----------
         analyst_books : pl.DataFrame
-            Pre-validated with columns: ['analyst_id', 'asset_id', 'weight']
+            Pre-validated with columns: ['analyst_id', 'stock_id', 'weight']
         predict_pnl : pl.DataFrame
             Pre-validated with columns: ['analyst_id', 'predicted_pnl']
         
         Returns
         -------
         pl.DataFrame
-            Columns: ['asset_id', 'meta_weight']
+            Columns: ['stock_id', 'meta_weight']
         """
         sig = (
             predict_pnl
@@ -166,25 +171,25 @@ class MetaPortfolio:
         long_part = (
             analyst_books.join(scalars.select(["analyst_id", "c_pos"]), on="analyst_id", how="inner")
                          .with_columns((pl.col("weight") * pl.col("c_pos")).alias("w_contrib"))
-                         .group_by("asset_id")
+                         .group_by("stock_id")
                          .agg(pl.col("w_contrib").sum().alias("w_pos"))
         )
 
         short_part = (
             analyst_books.join(scalars.select(["analyst_id", "c_neg"]), on="analyst_id", how="inner")
                          .with_columns((-pl.col("weight") * pl.col("c_neg")).alias("w_contrib"))
-                         .group_by("asset_id")
+                         .group_by("stock_id")
                          .agg(pl.col("w_contrib").sum().alias("w_neg"))
         )
 
         return (
-            long_part.join(short_part, on="asset_id", how="outer")
+            long_part.join(short_part, on="stock_id", how="outer")
                      .with_columns([
                          pl.col("w_pos").fill_null(0.0),
                          pl.col("w_neg").fill_null(0.0),
                      ])
                      .with_columns((pl.col("w_pos") + pl.col("w_neg")).alias("meta_weight"))
-                     .select(["asset_id", "meta_weight"])
+                     .select(["stock_id", "meta_weight"])
         )
     
     @staticmethod

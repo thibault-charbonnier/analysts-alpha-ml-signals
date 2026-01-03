@@ -85,18 +85,31 @@ class Backtester:
                                 decay_half_life=self.config.decay_halflife).at_snapshot(snapshot_date=t)
             book_history.append(book_t)
 
-            X_t = FeaturesEngine(...).generate_features(book=book_t, as_of_date=t)
-            y_hat_t = self.model.predict(X=X_t)
+            # A brancher quand le features engine sera pret
+            # X_t: pl.DataFrame = FeaturesEngine(...).generate_features(book=book_t, as_of_date=t)
+            # y_hat_t = (
+            #     X_t
+            #     .select("analyst_id")
+            #     .with_columns(pl.Series("predicted_pnl", self.model.predict(X=X_t)))
+            # )
+            # En attendant on simule avec de l'aléatoire
+            import numpy as np
+            df = book_t.select("analyst_id").unique().sort("analyst_id")
+            y_hat_t = df.with_columns(pl.Series("predicted_pnl",
+                                                np.random.default_rng(42).normal(0, 0.01, df.height)))
 
             w_t = self.ptf.create_metaportfolio(
                 analyst_books=book_t,
                 predict_pnl=y_hat_t,
                 method=self.config.construction_method,
-                normalize_weights=self.config.normalize_weights
+                normalize=self.config.normalize_weights
             )
+            w_t = w_t.with_columns(pl.lit(t).alias("date"))
             weight_history.append(w_t)
 
-        logger.info("Backtesting process completed.")
+        logger.info("Backtesting process completed, analyzing results...")
+
+        self._analyst_backtest(ptf_weights=weight_history, prices=df_prices)
 
     # -----------------------------------------------------------------
     # |                       Private Helpers                         |
@@ -111,10 +124,13 @@ class Backtester:
         ModelWrapper
             An instance of the wrapped model loaded from disk inherited from ModelWrapper.
         """
-        self.model = ModelType[self.config.model_name].value()
-        self.model.load_model(model_path=self.config.model_paths.get('SKOPS'),
-                            manifest_path=self.config.model_paths.get('MANIFEST'))
-        logger.info(f"Model {self.config.model_name} loaded successfully from disk.")
+        try:
+            self.model = ModelType[self.config.model_name].value()
+            self.model.load_model(model_path=self.config.model_paths.get('SKOPS'),
+                                  manifest_path=self.config.model_paths.get('MANIFEST'))
+            logger.info(f"Model {self.config.model_name} loaded successfully from disk.")
+        except Exception as e:
+            logger.error(f"Failed to load model {self.config.model_name}: {e}")
         
     def _load_data(self, start_date: date = None, end_date: date = None) -> tuple[pl.DataFrame, pl.DataFrame]:
         """
@@ -165,6 +181,7 @@ class Backtester:
         start_date = _parse_date(self.config.test_start_date)
         end_date = _parse_date(self.config.test_end_date)
         warmup_months = self.config.warmup_test_months
+        logger.info(f"Building backtesting timeline from {start_date} to {end_date} with {warmup_months} months warm-up.")
 
         if warmup_months > 0:
             warmup_start = _add_months(start_date, -warmup_months)
@@ -177,3 +194,86 @@ class Backtester:
         
         logger.info(f"Backtesting timeline constructed: Warm-up ({len(warmup)} months), Backtest ({len(backtest)} months)")
         return Timeline(warmup=warmup, backtest=backtest, all=warmup + backtest)
+    
+    def _compute_monthly_returns(self, df_prices: pl.DataFrame) -> pl.DataFrame:
+        """
+        Build monthly returns from daily prices (1st to 1st) over the backtest period.
+            - Price open of month M: first price of month M
+            - Price next of month M: price open of month M+1
+            - Return of month M: (p_next(M) / p_open(M)) - 1.0
+
+        Parameters
+        ----------
+        df_prices : pl.DataFrame
+            DataFrame containing price data for the assets.
+        
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame containing monthly returns for each asset.
+        """
+        df = (
+            df_prices
+            .select(["date", "stock_id", "price"])
+            .with_columns([pl.col("date").dt.truncate("1mo").alias("date")])
+        )
+
+        opens = (
+            df.group_by(["stock_id", "date"])
+            .agg(pl.col("price").first().alias("p_open"))
+            .sort(["stock_id", "date"])
+        )
+
+        return (
+            opens
+            .with_columns(
+                pl.col("p_open").shift(-1).over("stock_id").alias("p_next")
+            )
+            .with_columns(
+                ((pl.col("p_next") / pl.col("p_open")) - 1.0).alias("ret")
+            )
+            .drop_nulls(["ret"])
+            .select(["date", "stock_id", "ret"])
+            .sort(["date", "stock_id"])
+            .cast({"date": pl.Date})
+        )
+    
+    def _analyst_backtest(self, ptf_weights: list[pl.DataFrame], prices: pl.DataFrame) -> pl.DataFrame:
+        """
+        Analyse the backtest performance of the meta-analyst portfolio strategy.
+        Save the performance results to an Excel file.
+
+        Parameters
+        ----------
+        ptf_weights : list[pl.DataFrame]
+            List of DataFrames containing portfolio weights for each backtest date.
+        prices : pl.DataFrame
+            DataFrame containing price data for the assets.
+
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame containing the backtest performance results.
+        """
+        df_weights = pl.concat(ptf_weights).select(["date", "stock_id", "meta_weight"]).cast({"date": pl.Date})
+
+        df_returns = self._compute_monthly_returns(df_prices=prices)
+
+        perf = (
+            df_weights
+            .join(df_returns, on=["date", "stock_id"], how="inner")
+            .with_columns((pl.col("meta_weight") * pl.col("ret")).alias("weighted_ret"))
+            .group_by("date")
+            .agg(pl.col("weighted_ret").sum().alias("strategy_ret"))
+            .sort("date")
+            .with_columns([(pl.col("strategy_ret") + 1).cum_prod().alias("cumulative_ret")])
+        )
+        logger.info("Backtest performance analysis completed.")
+
+        # path = self.config.backtest_base_path + f"/backtest_{self.config.model_name}_{self.config.test_start_date}_{self.config.test_end_date}_{date.today()}.xlsx"
+        path2 = "outputs" + f"/backtest_{self.config.model_name}_{self.config.test_start_date}_{self.config.test_end_date}_{date.today()}.xlsx"
+        # perf.write_excel(path)
+        perf.write_excel(path2)
+        # logger.info(f"Backtest performance saved to {path}")
+
+        return perf

@@ -37,6 +37,9 @@ class Config:
         self.test_end_date: str = None
         self.warmup_test_months: int = 24
 
+        # Output paths
+        self.backtest_base_path: str = "None"
+
         self._load_run_config()
         self._load_model_config()
 
@@ -71,6 +74,8 @@ class Config:
 
             self.target_price_path = config.get('DATA').get('ESTIMATES_PATH')
             self.prices_path = config.get('DATA').get('PRICES_PATH')
+
+            self.backtest_base_path = config.get('OUTPUT').get('BASE_BACKTEST', "None")
 
     def _load_model_config(self, filepath: str = "configs/ml_config.json"):
         """

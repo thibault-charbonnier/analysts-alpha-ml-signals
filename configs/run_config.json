@@ -5,6 +5,10 @@
         "ESTIMATES_PATH": "s3://alpha-in-analysts-storage/data/estimates.parquet",
         "PRICES_PATH": "s3://alpha-in-analysts-storage/data/prices.parquet"
     },
+    "OUTPUT":
+    {
+        "BASE_BACKTEST": "s3://alpha-in-analysts-storage/output/"
+    },
     "RUN":
     {
         "TRAINING":
@@ -16,7 +20,7 @@
         "TESTING":
         {
             "START_DATE": "2019-01",
-            "END_DATE": "2025-11",
+            "END_DATE": "2024-12",
             "WARMUP_MONTHS": 12
         }
     },
@@ -30,7 +34,7 @@
         "TRANSFO_DEAD_ZONE": 0.02,
         "TRANSFO_K_POS": 12.0,
         "TRANSFO_K_NEG": 12.0,
-        "METHOD": "PAPER",
+        "METHOD": "paper",
         "NORMALIZE_WEIGHTS": false
     }
 }

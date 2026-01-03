@@ -1,3 +1,5 @@
+print(">>> main.py started", flush=True)
+
 import polars as pl
 import time
 from src.alpha_in_analysts.utils.s3_utils import s3Utils
