@@ -12,6 +12,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "fsspec>=2021.7.0",
     "matplotlib>=3.10.7",
+    "pandas-market-calendars>=5.2.3",
     "pandas>=2.3.3",
     "polars>=1.35.2",
     "pyarrow>=22.0.0",

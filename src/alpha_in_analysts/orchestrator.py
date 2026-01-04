@@ -10,7 +10,9 @@ from .utils.mapping import ModelType
 
 logger = logging.getLogger(__name__)
 
-
+# Orchestrator
+# CV
+# instancier le modèle : rajouter les ()
 class Orchestrator:
     """
     High level orchestrator dedicated to manage the learning process of machine learning models on analysts' data.
@@ -45,14 +47,22 @@ class Orchestrator:
     def run(self):
         """
         Run the learning process as described in the class docstring.
-        """
-        pass
+        """ 
+        self._create_model()
+
+        end_train = helper ...
+        res = features.up_to_date(end_train)
+
+        X_train = res.drop(columns=["date", "analyst_id", "target_pnl"])
+        y_train = res.select("target_pnl")
+        self.model.fit(X=X_train, y=y_train)
+        self._save_model()
 
     # -----------------------------------------------------------------
     # |                       Private Helpers                         |
     # -----------------------------------------------------------------
 
-    def _load_model(self) -> ModelWrapper:
+    def _create_model(self) -> ModelWrapper:
         """
         Instantiate the model wrapper based on the configuration.
 
@@ -61,7 +71,7 @@ class Orchestrator:
         ModelWrapper
             An instance of the wrapped model inherited from ModelWrapper.
         """
-        self.model = ModelType[self.config.model_name].value
+        self.model = ModelType[self.config.model_name].value()
         self.model.create_model(hyper_params=self.config.model_params)
         logger.info(f"Model {self.config.model_name} created successfully.")
     

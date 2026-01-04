@@ -43,22 +43,18 @@ class BookEngine:
                 - stock_id: Unique identifier of the stock (permno)
                 - reco_date: Date of the target price publication
                 - target_price: Target price value
-
         df_prices: polars.DataFrame
             DataFrame with market prices informations
             Needs columns :
                 - stock_id: Unique identifier of the stock (permno)
                 - date: Date of the price
                 - price: Market price value
-
         df_metadata: polars.DataFrame, default None
             DataFrame with stock metadata informations
             If not None, needs at least the column :
                 - stock_id: Unique identifier of the stock (permno)
-
         validity_length: int, default 12
             Number of month for which a target price is considered still valid
-
         decay_half_life: int, default 6
             Parameter of the exponential decay, number of month needed to
             decrease the power of the recommandation by 2
