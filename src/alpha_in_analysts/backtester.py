@@ -8,7 +8,7 @@ from .model_wrappers.model_wrapper import ModelWrapper
 from .meta_portfolio import MetaPortfolio
 from .utils.config import Config
 from .utils.mapping import ModelType
-from .utils.helpers import Timeline, _parse_date, _add_months, _month_range
+from .utils.helpers import _parse_date, _add_months, _month_range, _last_trading_day_of_month
 from .utils.s3_utils import s3Utils
 
 logger = logging.getLogger(__name__)
@@ -63,40 +63,38 @@ class Backtester:
 
         timeline = self._build_timeline()
 
-        df_tp, df_prices = self._load_data(start_date=timeline.warmup[0], end_date=timeline.backtest[-1])
+        df_tp, df_prices = self._load_data(start_date=_add_months(timeline[0], -1), end_date=timeline[-1])
 
-        book_history: list[pl.DataFrame] = []
         weight_history: list[pl.DataFrame] = []
 
-        for t in timeline.warmup:
-            logger.info(f"\tBuilding book for warm-up date: {t}")
-            book_t = BookEngine(df_tp=df_tp,
-                                df_prices=df_prices,
-                                validity_length=self.config.validity_length,
-                                decay_half_life=self.config.decay_halflife).at_snapshot(snapshot_date=t)
-            book_history.append(book_t)
+        features_engine = FeaturesEngine(df_target_prices=df_tp,
+                                        df_prices=df_prices,
+                                        validity_length=self.config.validity_length,
+                                        decay_half_life=self.config.decay_halflife)
+        
+        res = features_engine.build_all_features(up_to_date=timeline[-1],
+                                                 lookback_perf_pct=12,
+                                                 lookback_perf=6,
+                                                 lookback_vol_pct=6,
+                                                 lookback_vol=6,
+                                                 lookback_mean_ret=6,
+                                                 drop_na=True)
 
-        for t in timeline.backtest:
+        for t in timeline:
             logger.info(f"\tRunning backtest for date: {t}")
 
             book_t = BookEngine(df_tp=df_tp,
                                 df_prices=df_prices,
                                 validity_length=self.config.validity_length,
-                                decay_half_life=self.config.decay_halflife).at_snapshot(snapshot_date=t)
-            book_history.append(book_t)
+                                decay_half_life=self.config.decay_halflife
+                                ).at_snapshot(snapshot_date=t)
 
-            # A brancher quand le features engine sera pret
-            # X_t: pl.DataFrame = FeaturesEngine(...).generate_features(book=book_t, as_of_date=t)
-            # y_hat_t = (
-            #     X_t
-            #     .select("analyst_id")
-            #     .with_columns(pl.Series("predicted_pnl", self.model.predict(X=X_t)))
-            # )
-            # En attendant on simule avec de l'aléatoire
-            import numpy as np
-            df = book_t.select("analyst_id").unique().sort("analyst_id")
-            y_hat_t = df.with_columns(pl.Series("predicted_pnl",
-                                                np.random.default_rng(42).normal(0, 0.01, df.height)))
+            X_t: pl.DataFrame = res.filter(pl.col("date") == t).drop("date")
+            y_hat_t = (
+                X_t
+                .select("analyst_id")
+                .with_columns(pl.Series("predicted_pnl", self.model.predict(X=X_t)))
+            )
 
             w_t = self.ptf.create_metaportfolio(
                 analyst_books=book_t,
@@ -109,20 +107,15 @@ class Backtester:
 
         logger.info("Backtesting process completed, analyzing results...")
 
-        self._analyst_backtest(ptf_weights=weight_history, prices=df_prices)
+        self._analyst_backtest(ptf_weights=weight_history, prices=df_prices, timeline=timeline)
 
     # -----------------------------------------------------------------
     # |                       Private Helpers                         |
     # -----------------------------------------------------------------
 
-    def _load_model(self) -> ModelWrapper:
+    def _load_model(self):
         """
         Load the trained model from disk using the ModelWrapper interface.
-
-        Returns
-        -------
-        ModelWrapper
-            An instance of the wrapped model loaded from disk inherited from ModelWrapper.
         """
         try:
             self.model = ModelType[self.config.model_name].value()
@@ -158,87 +151,80 @@ class Backtester:
         logger.info(f"Data loaded from S3: Target Prices ({df_tp.shape}), Prices ({df_prices.shape})")
         return df_tp, df_prices
     
-    def _build_timeline(self) -> Timeline:
+    def _build_timeline(self) -> list[date]:
         """
-        Build the timeline for the backtesting process, including warm-up and backtest periods.
-        Each date in the timeline corresponds to the first day of each month.
-
-        Example :
-
-            Input:
-                - test_start_date: str (e.g., "2020-01")
-                - test_end_date: str (e.g., "2025-01")
-                - warmup_test_months: int (e.g., 12)
-            Output:
-                - warmup: ["2019-01-01", ..., "2019-12-01"]
-                - backtest: ["2020-01-01", ..., "2025-01-01"]
+        Build the backtesting timeline based on the configuration.
+        Corresponds to a list of dates from test_start_date to test_end_date.
             
         Returns
         -------
-        Timeline
-            An object containing lists of dates for warm-up and backtest periods.
+        list[date]
+            A list of dates for the backtest period.
         """
         start_date = _parse_date(self.config.test_start_date)
         end_date = _parse_date(self.config.test_end_date)
-        warmup_months = self.config.warmup_test_months
-        logger.info(f"Building backtesting timeline from {start_date} to {end_date} with {warmup_months} months warm-up.")
-
-        if warmup_months > 0:
-            warmup_start = _add_months(start_date, -warmup_months)
-            warmup_end = _add_months(start_date, -1)
-            warmup = _month_range(warmup_start, warmup_end)
-        else:
-            warmup = []
 
         backtest = _month_range(start_date, end_date)
         
-        logger.info(f"Backtesting timeline constructed: Warm-up ({len(warmup)} months), Backtest ({len(backtest)} months)")
-        return Timeline(warmup=warmup, backtest=backtest, all=warmup + backtest)
+        logger.info(f"Backtesting timeline constructed:{len(backtest)} months")
+
+        return backtest
     
-    def _compute_monthly_returns(self, df_prices: pl.DataFrame) -> pl.DataFrame:
+    def _compute_monthly_returns(self, df_prices: pl.DataFrame, month_ends: list[date]) -> pl.DataFrame:
         """
-        Build monthly returns from daily prices (1st to 1st) over the backtest period.
-            - Price open of month M: first price of month M
-            - Price next of month M: price open of month M+1
-            - Return of month M: (p_next(M) / p_open(M)) - 1.0
+        Compute monthly returns for each stock based on end-of-month prices.
+        Returns with a given date M (yyyy-mm-dd) correspond to the return from date M to date M+1.
+
+        Ex : 
+            Return for 2020-01-31 is computed as (Price at 2020-02-28 / Price at 2020-01-31) - 1
 
         Parameters
         ----------
         df_prices : pl.DataFrame
-            DataFrame containing price data for the assets.
-        
+            DataFrame containing price data with columns ['date', 'stock_id', 'price'].
+        month_ends : list[date]
+            List of end-of-month dates to compute returns for.
+
         Returns
         -------
         pl.DataFrame
-            DataFrame containing monthly returns for each asset.
+            DataFrame containing monthly returns with columns ['date', 'stock_id', 'ret'].
         """
-        df = (
-            df_prices
-            .select(["date", "stock_id", "price"])
-            .with_columns([pl.col("date").dt.truncate("1mo").alias("date")])
+        month_ends_df = (
+            pl.DataFrame({"date": month_ends})
+            .with_columns(pl.col("date").cast(pl.Date))
+            .sort("date")
         )
 
-        opens = (
-            df.group_by(["stock_id", "date"])
-            .agg(pl.col("price").first().alias("p_open"))
+        prices = (
+            df_prices
+            .select(["date", "stock_id", "price"])
+            .with_columns(pl.col("date").cast(pl.Date))
+            .sort(["stock_id", "date"])
+        )
+
+        stocks = prices.select("stock_id").unique()
+
+        grid = stocks.join(month_ends_df, how="cross").sort(["stock_id", "date"])
+
+        eom_prices = (
+            grid
+            .join_asof(prices, on="date", by="stock_id", strategy="backward")
+            .rename({"price": "p_open"})
             .sort(["stock_id", "date"])
         )
 
         return (
-            opens
-            .with_columns(
-                pl.col("p_open").shift(-1).over("stock_id").alias("p_next")
-            )
-            .with_columns(
-                ((pl.col("p_next") / pl.col("p_open")) - 1.0).alias("ret")
-            )
-            .drop_nulls(["ret"])
+            eom_prices
+            .with_columns(pl.col("p_open").shift(-1).over("stock_id").alias("p_next"))
+            .with_columns(((pl.col("p_next") / pl.col("p_open")) - 1.0).alias("ret"))
+            .drop_nulls(["p_open", "p_next", "ret"])
             .select(["date", "stock_id", "ret"])
             .sort(["date", "stock_id"])
             .cast({"date": pl.Date})
         )
     
-    def _analyst_backtest(self, ptf_weights: list[pl.DataFrame], prices: pl.DataFrame) -> pl.DataFrame:
+    def _analyst_backtest(self, ptf_weights: list[pl.DataFrame], prices: pl.DataFrame, timeline: list[date]) -> pl.DataFrame:
         """
         Analyse the backtest performance of the meta-analyst portfolio strategy.
         Save the performance results to an Excel file.
@@ -249,6 +235,8 @@ class Backtester:
             List of DataFrames containing portfolio weights for each backtest date.
         prices : pl.DataFrame
             DataFrame containing price data for the assets.
+        timeline : list[date]
+            List of dates corresponding to the backtest timeline.
 
         Returns
         -------
@@ -257,11 +245,12 @@ class Backtester:
         """
         df_weights = pl.concat(ptf_weights).select(["date", "stock_id", "meta_weight"]).cast({"date": pl.Date})
 
-        df_returns = self._compute_monthly_returns(df_prices=prices)
+        df_returns = self._compute_monthly_returns(df_prices=prices, month_ends=timeline)
 
         perf = (
             df_weights
             .join(df_returns, on=["date", "stock_id"], how="inner")
+            .with_columns(pl.col("ret").fill_null(0.0))
             .with_columns((pl.col("meta_weight") * pl.col("ret")).alias("weighted_ret"))
             .group_by("date")
             .agg(pl.col("weighted_ret").sum().alias("strategy_ret"))

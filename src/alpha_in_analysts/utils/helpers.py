@@ -1,6 +1,6 @@
 import polars as pl
-from datetime import date, datetime
-from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+import pandas_market_calendars as mcal
 
 def _validate_date(dt: date | datetime | str) -> date:
     """
@@ -28,20 +28,28 @@ def _validate_date(dt: date | datetime | str) -> date:
 
     raise TypeError("Date must be of type date, datetime, or string.")
 
-@dataclass
-class Timeline:
-    warmup: list[date]
-    backtest: list[date]
-    all: list[date]
+def _last_trading_day_of_month(y: int, m: int) -> date:
+    start = date(y, m, 1)
+
+    # first day of next month
+    y2 = y + (m // 12)
+    m2 = (m % 12) + 1
+    end = date(y2, m2, 1) - timedelta(days=1)
+
+    sched = mcal.get_calendar("NYSE").schedule(start_date=start, end_date=end)
+    if sched.empty:
+        raise ValueError(f"No trading days found for {y}-{m:02d} on calendar NYSE")
+
+    return sched.index.max().date()
 
 def _parse_date(ym: str) -> date:
-        y, m = ym.split("-")
-        return date(int(y), int(m), 1)
+    y, m = ym.split("-")
+    return _last_trading_day_of_month(int(y), int(m))
 
 def _add_months(d: date, n: int) -> date:
     y = d.year + (d.month - 1 + n) // 12
     m = (d.month - 1 + n) % 12 + 1
-    return date(y, m, 1)
+    return _last_trading_day_of_month(y, m)
 
 def _month_range(start: date, end: date) -> list[date]:
     out = []
