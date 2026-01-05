@@ -61,6 +61,8 @@ class FeaturesEngine(BookEngine):
         self.df_books_wide = None
         self.pnl_all_analysts = None
         self.coverage = None
+        self.y = None
+        self.dates = None
 
     def _build_books(self,
                      return_bool: bool = False
@@ -191,6 +193,9 @@ class FeaturesEngine(BookEngine):
             month_end_trading_days
             .join(df_weights_pivoted, on="date", how="left")
             .sort("date")
+            # .with_columns(
+            #     pl.exclude("date").fill_null(strategy="forward", limit=2)
+            # )
         )
 
         return {
@@ -267,6 +272,11 @@ class FeaturesEngine(BookEngine):
                 )
             )
         )
+        # !!! Shift returns by -1 to align with weights
+        df_returns = df_returns.with_columns(
+            pl.exclude("date").shift(-1)
+        )
+
         return df_returns
 
     def _build_pnl_per_analyst(self,
@@ -308,7 +318,7 @@ class FeaturesEngine(BookEngine):
             weights=df_weights_pivoted,
             rebal_periods=1
         )
-        ptf.rebalance_portfolio(return_bool=False)
+        ptf.rebalance_portfolio_irregular()
 
         backtester = Backtest(
             returns=df_returns,
@@ -356,7 +366,10 @@ class FeaturesEngine(BookEngine):
             .to_list()
         )
 
-        for i, analyst_id in enumerate(analyst_ids):
+        # random sample of analysts for testing
+        import pandas as pd
+        a = pd.Series(analyst_ids).sample(15, random_state=42).tolist()
+        for i, analyst_id in enumerate(a):
             print(f"Building PnL for analyst {analyst_id} ({i+1}/{len(analyst_ids)})")
             res = self._build_pnl_per_analyst(
                 analyst_id=analyst_id,
@@ -578,7 +591,7 @@ class FeaturesEngine(BookEngine):
                         (pl.col("n_obs") == pl.col("n_expected"))
                         & (pl.col("std_ret") > 0)
                     )
-                    .then(pl.sqrt(pl.lit(12.0)) * pl.col("mean_ret") / pl.col("std_ret"))
+                    .then((pl.lit(12.0).sqrt()) * pl.col("mean_ret") / pl.col("std_ret"))
                     .otherwise(None)
                 ).alias(f"sharpe_{n}m")
             )
@@ -710,14 +723,17 @@ class FeaturesEngine(BookEngine):
 
         return mean_coverage_pct_nm
 
-    def build_all_features(self,
+    def _build_all_features(self,
                            up_to_date:str,
                            lookback_perf_pct:int=12,
                            lookback_perf:int=6,
                            lookback_vol_pct:int=6,
                            lookback_vol: int = 6,
                            lookback_mean_ret:int=6,
-                           drop_na:bool=True,
+                            lookback_recent_sharpe:int=6,
+                            lookback_sharpe:int=12,
+                            lookback_sortino:int=12,
+                            lookback_recent_sortino:int=6
                            ):
         """
         Main method to build all features at once.
@@ -735,8 +751,6 @@ class FeaturesEngine(BookEngine):
             Lookback period (in months) for recent volatility feature.
         lookback_mean_ret : int
             Lookback period (in months) for mean return feature.
-        drop_na : bool
-            Whether to drop rows with any null values in the final features dataframe.
         """
         if self.pnl_all_analysts is None:
             try:
@@ -748,22 +762,28 @@ class FeaturesEngine(BookEngine):
                 print("Could not load pnl_all_analysts from S3, building it locally.")
                 self._build_pnl_all_analysts(ret_bool=False)
 
-        if self.coverage is None:
-            try:
-                self.coverage = s3Utils.pull_parquet_file_from_s3(
-                    path="s3://alpha-in-analysts-storage/data/coverage.parquet",
-                    to_polars=True
-                )
-            except Exception as e:
-                print("Could not load coverage from S3, building it locally.")
-                self._build_pnl_all_analysts(ret_bool=False)
+        # if self.coverage is None:
+        #     try:
+        #         self.coverage = s3Utils.pull_parquet_file_from_s3(
+        #             path="s3://alpha-in-analysts-storage/data/coverage.parquet",
+        #             to_polars=True
+        #         )
+        #     except Exception as e:
+        #         print("Could not load coverage from S3, building it locally.")
+        #         self._build_pnl_all_analysts(ret_bool=False)
 
         perf_pct = self._build_cum_perf(up_to_date=up_to_date,
                                         n=lookback_perf_pct,
                                         pct=True)
+        perf = self._build_cum_perf(up_to_date=up_to_date,
+                                        n=lookback_perf_pct,
+                                        pct=False)
         recent_perf_pct = self._build_cum_perf(up_to_date=up_to_date,
                                                n=lookback_perf,
                                                pct=True)
+        recent_perf = self._build_cum_perf(up_to_date=up_to_date,
+                                               n=lookback_perf,
+                                               pct=False)
         recent_vol_pct = self._build_volatility(up_to_date=up_to_date,
                                                 n=lookback_vol_pct,
                                                 pct=True)
@@ -773,13 +793,45 @@ class FeaturesEngine(BookEngine):
         mean_ret = self._build_mean_ret(up_to_date=up_to_date,
                                         n=lookback_mean_ret,
                                         pct=False)
+        mean_ret_pct = self._build_mean_ret(up_to_date=up_to_date,
+                                        n=lookback_mean_ret,
+                                        pct=True)
+        recent_sharpe = self._build_sharpe(up_to_date=up_to_date,
+                                    n=lookback_recent_sharpe,
+                                    pct=False)
+        recent_sharpe_pct = self._build_sharpe(up_to_date=up_to_date,
+                                           n=lookback_recent_sharpe,
+                                           pct=True)
+        sharpe = self._build_sharpe(up_to_date=up_to_date,
+                                           n=lookback_sharpe,
+                                           pct=False)
+        sharpe_pct = self._build_sharpe(up_to_date=up_to_date,
+                                    n=lookback_sharpe,
+                                    pct=True)
+        recent_sortino = self._build_sortino(up_to_date=up_to_date,
+                                    n=lookback_recent_sortino,
+                                    pct=False)
+        recent_sortino_pct = self._build_sortino(up_to_date=up_to_date,
+                                           n=lookback_recent_sortino,
+                                           pct=True)
+        sortino = self._build_sortino(up_to_date=up_to_date,
+                                             n=lookback_sortino,
+                                             pct=False)
+        sortino_pct = self._build_sortino(up_to_date=up_to_date,
+                                    n=lookback_sortino,
+                                    pct=True)
 
         # Add a column with the up_to_date date in each df, named 'date'
-        features = [perf_pct, recent_perf_pct, recent_vol_pct, recent_vol, mean_ret]
+        features = [perf_pct, recent_perf_pct, recent_vol_pct, recent_vol, mean_ret,
+                    mean_ret_pct, perf, recent_perf, recent_sharpe, recent_sharpe_pct,
+                    sharpe, sharpe_pct, recent_sortino, recent_sortino_pct, sortino, sortino_pct]
+        dates = self.df_prices.select(pl.col("date")).unique().sort("date").to_series().to_list()
+        date_x_index = dates.index(pl.Series([up_to_date]).str.strptime(pl.Date).item())
+        date_y = str(dates[date_x_index+12])
         features = [
             df
             .with_columns(
-                pl.lit(up_to_date).str.strptime(pl.Date).alias("date")
+                pl.lit(date_y).str.strptime(pl.Date).alias("date")
             )
             .select(
                 ["date"] + [c for c in df.columns if c != "date"]
@@ -796,9 +848,119 @@ class FeaturesEngine(BookEngine):
                 on=["date", "analyst_id"],
                 how="inner"
             )
-        if drop_na:
-            # Keep rows without any nulls
-            return df_features.drop_nulls()
-        else:
-            return df_features
+        df_features = df_features.drop_nulls()
+        return df_features
+
+    def _build_y(self, up_to_date:str=None, lookback:int=12):
+
+        y = self._build_cum_perf(up_to_date=up_to_date,
+                                    n=lookback,
+                                    pct=False)
+        y = (
+            y
+            .with_columns(
+                pl.lit(up_to_date).str.strptime(pl.Date).alias("date")
+            )
+            .select(
+                ["date"] + [c for c in y.columns if c != "date"]
+            )
+        )
+        y = y.rename({"perf_12m": "y"})
+        self.y = y
+
+    def get_features_and_y(self,
+                           up_to_date:str,
+                           lookback_perf_pct:int=12,
+                           lookback_perf:int=6,
+                           lookback_vol_pct:int=6,
+                           lookback_vol: int = 6,
+                           lookback_mean_ret:int=6,
+                            lookback_sharpe:int=12,
+                            lookback_sortino:int=12,
+                            lookback_recent_sharpe:int=6,
+                            lookback_recent_sortino:int=6,
+                           lookback_y:int=12
+                           ):
+        """
+        Get features and target variable y at once.
+        Parameters
+        ----------
+        up_to_date : str
+            Date at which to compute the features (formation date).
+        lookback_perf_pct : int
+            Lookback period (in months) for performance percentile feature.
+        lookback_perf : int
+            Lookback period (in months) for recent performance feature.
+        lookback_vol_pct : int
+            Lookback period (in months) for volatility percentile feature.
+        lookback_vol : int
+            Lookback period (in months) for recent volatility feature.
+        lookback_mean_ret : int
+            Lookback period (in months) for mean return feature.
+        lookback_sharpe : int
+            Lookback period (in months) for Sharpe ratio feature.
+        lookback_recent_sharpe : int
+            Lookback period (in months) for recent Sharpe ratio feature.
+        lookback_sortino : int
+            Lookback period (in months) for Sortino ratio feature.
+        lookback_recent_sortino : int
+            Lookback period (in months) for recent Sortino ratio feature.
+        lookback_y : int
+            Lookback period (in months) for target variable y.
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame with features and target variable y.
+        """
+        if self.dates is None:
+            self.dates = (
+                self.df_prices
+                .select(pl.col("date").cast(pl.Date))
+                .unique()
+                .sort("date")
+                .to_series()
+                .to_list()
+            )
+
+        up_to_date_y_pl = pl.Series([up_to_date]).str.strptime(pl.Date).item()
+        date_x_idx = self.dates.index(up_to_date_y_pl)
+        if date_x_idx <= 12:
+            raise ValueError("Not enough data to compute target variable y. Need at least 12 months + "
+                             "max lookback period of the features of data before the up_to_date.")
+        up_to_date_x = str(self.dates[date_x_idx-12])
+
+        df_features = self._build_all_features(
+            up_to_date=up_to_date_x,
+            lookback_perf_pct=lookback_perf_pct,
+            lookback_perf=lookback_perf,
+            lookback_vol_pct=lookback_vol_pct,
+            lookback_vol=lookback_vol,
+            lookback_mean_ret=lookback_mean_ret,
+            lookback_sharpe=lookback_sharpe,
+            lookback_recent_sharpe=lookback_recent_sharpe,
+            lookback_sortino=lookback_sortino,
+            lookback_recent_sortino=lookback_recent_sortino
+        )
+        if self.y is None:
+            self._build_y(up_to_date=str(up_to_date_y_pl), lookback=lookback_y)
+
+        y_tmp = (
+            self.y
+            .select(["analyst_id", "y"])
+        )
+        df_final = (
+            df_features
+            .join(
+                y_tmp,
+                on="analyst_id",
+                how="inner"
+            )
+        )
+        df_final = df_final.drop_nulls()
+        return df_final
+
+
+
+
+
 

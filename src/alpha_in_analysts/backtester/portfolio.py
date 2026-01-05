@@ -1,5 +1,7 @@
 import polars as pl
 from typing import Union
+import pandas as pd
+import numpy as np
 
 class CreatePortfolio:
     """Class to compute portfolio level returns given assets' weights and returns"""
@@ -153,3 +155,104 @@ class CreatePortfolio:
 
             else:
                 continue
+
+    def rebalance_portfolio_irregular(self, max_drift: int = 12)->None:
+        """
+        Vectorized irregular-weight backtest (no asset loop).
+        """
+        weights_pd = self.weights.to_pandas()
+        weights_pd.index = weights_pd["date"]
+        weights_pd = weights_pd.drop(columns=["date"])
+        returns_pd = self.returns.to_pandas()
+        returns_pd.index = returns_pd["date"]
+        returns_pd = returns_pd.drop(columns=["date"])
+
+        assert weights_pd.index.equals(returns_pd.index)
+        assert (weights_pd.columns == returns_pd.columns).all()
+
+        dates = weights_pd.index
+        assets = weights_pd.columns
+
+        # Storage
+        self.rebalanced_weights = pd.DataFrame(index=dates, columns=assets, dtype=float)
+        self.turnover = pd.DataFrame(index=dates, columns=["turnover"], dtype=float)
+
+        # Months since last update
+        months_since_update = pd.DataFrame(
+            0, index=dates, columns=assets, dtype=int
+        )
+
+        # --- Initialization ---
+        w0 = weights_pd.iloc[0]
+        gross0 = w0.abs().sum()
+
+        w0_final = w0 / gross0 if gross0 > 0 else np.nan
+        self.rebalanced_weights.iloc[0] = w0_final
+
+        # Initial turnover = build portfolio from zero
+        self.turnover.iloc[0] = w0_final.abs().sum() if gross0>0 else 0.0
+
+        # --- Time loop only ---
+        for t in range(1, len(dates)):
+            w_prev = self.rebalanced_weights.iloc[t - 1]
+            r_t = returns_pd.iloc[t]
+            w_obs = weights_pd.iloc[t]
+
+            # Identify updates
+            has_update = w_obs.notna()
+
+            # Update months-since-update
+            months_since_update.iloc[t] = (
+                    months_since_update.iloc[t - 1] + 1
+            )
+            months_since_update.loc[dates[t],has_update] = 0
+
+            # Drifted weights
+            w_drift = w_prev * (1 + r_t)
+
+            # Raw weights construction
+            w_raw = pd.Series(index=assets, dtype=float)
+
+            # Case 1: observed weights
+            w_raw[has_update] = w_obs[has_update]
+
+            # Case 2: drift allowed
+            drift_ok = (~has_update) & (months_since_update.iloc[t] <= max_drift)
+            w_raw[drift_ok] = w_drift[drift_ok]
+
+            # Case 3: drift expired → NaN (already NaN by construction)
+
+            # Normalize (gross exposure)
+            gross = w_raw.abs().sum()
+            if gross > 0:
+                w_final = w_raw / gross
+                self.rebalanced_weights.iloc[t] = w_final
+
+                # --- Turnover ---
+                self.turnover.iloc[t] = (
+                    w_final.sub(w_prev, fill_value=0.0)
+                    .abs()
+                    .sum()
+                )
+            else:
+                w_final = 0.0
+                self.rebalanced_weights.iloc[t] = np.nan
+
+                # --- Turnover ---
+                # When moving to zero position, turnover is the sum of absolute previous weights
+                self.turnover.iloc[t] = w_prev.abs().sum() if isinstance(w_prev, pd.Series) else 0.0
+
+        # Convert back to pl.DataFrame
+        self.rebalanced_weights = pl.from_pandas(
+            self.rebalanced_weights.reset_index().rename(columns={"index":"date"})
+        )
+        # cast date to pl.Date
+        self.rebalanced_weights = self.rebalanced_weights.with_columns(
+            pl.col("date").cast(pl.Date)
+        )
+        self.turnover = pl.from_pandas(
+            self.turnover.reset_index().rename(columns={"index":"date"})
+        )
+        self.turnover = self.turnover.with_columns(
+            pl.col("date").cast(pl.Date)
+        )

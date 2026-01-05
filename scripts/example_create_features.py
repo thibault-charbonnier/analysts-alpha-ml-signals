@@ -23,11 +23,29 @@ feature_engine = FeaturesEngine(
     start_date="2000-01-31",
     end_date="2024-12-31",
 )
-feature_engine._build_pnl_all_analysts()
-res = feature_engine.build_all_features(up_to_date="2024-12-31",
-                                        lookback_perf_pct=12,
-                                        lookback_perf=6,
-                                        lookback_vol_pct=6,
-                                        lookback_vol = 6,
-                                        lookback_mean_ret=6,
-                                        drop_na=True)
+# feature_engine._build_y()
+# feature_engine._build_pnl_all_analysts()
+# feature_engine.pnl_all_analysts.write_parquet("pnl_all_analysts_aligned_ret_ffill2m.parquet")
+d = s3Utils.pull_parquet_file_from_s3("s3://alpha-in-analysts-storage/data/pnl_all_analysts.parquet",
+                                  to_polars=True)
+dates = d.select(pl.col("date").unique()).sort("date").to_series().to_list()
+for i, date in enumerate(dates[24:]):  # skip first 24 months to have enough lookback
+    print("Building features up to date:", date)
+    res = feature_engine.get_features_and_y(up_to_date=str(date),
+                                            lookback_perf_pct=12,
+                                            lookback_perf=6,
+                                            lookback_vol_pct=6,
+                                            lookback_vol = 6,
+                                            lookback_mean_ret=6,
+                                            lookback_sharpe=12,
+                                            lookback_recent_sharpe=6,
+                                            lookback_sortino=12,
+                                            lookback_recent_sortino=6,
+                                            lookback_y=12
+                                            )
+    if i==0:
+        all_features = res
+    else:
+        all_features = pl.concat([all_features, res], how="vertical")
+
+
