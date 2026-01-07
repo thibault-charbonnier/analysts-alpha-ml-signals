@@ -6,6 +6,7 @@ from sklearn.linear_model import Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor
 from scipy.stats import spearmanr
 from sklearn.metrics import mean_squared_error
+from joblib import Parallel, delayed
 from dotenv import load_dotenv
 load_dotenv()
 import logging
@@ -33,7 +34,7 @@ def main(
         models = {
             "ridge": Ridge,
             "lasso": Lasso,
-            "random_forest": RandomForestRegressor
+            "random_forest": RandomForestRegressor(n_jobs=1)
         }
 
     # -------------------------
@@ -234,6 +235,9 @@ def main(
         train_data = data[data["date"] <= train_end]
         val_data = data[(data["date"] > train_end) & (data["date"] <= val_end)]
 
+        X_train = train_data.drop(columns=["date", "analyst_id", "y"])
+        y_train = train_data["y"]
+
         # -----------------------------
         # MODEL LOOP
         # -----------------------------
@@ -246,18 +250,15 @@ def main(
             # -----------------------------
             # HYPERPARAMETER SELECTION
             # -----------------------------
-            for nh, hyperparams in enumerate(hyperparams_all_combinations[model_name]):
+            # =========================
+            # HYPERPARAMETER FUNCTION
+            # =========================
+            def evaluate_hyperparams(hyperparams):
                 start_hyperparams = time.time()
 
-                # Instantiate model
                 model = ModelClass(**hyperparams)
-
-                # Train
-                X_train = train_data.drop(columns=["date", "analyst_id", "y"])
-                y_train = train_data["y"]
                 model.fit(X=X_train, y=y_train)
 
-                # ---- validation IC per date
                 ICs = []
                 for d in np.sort(val_data["date"].unique()):
                     X_val = val_data[val_data["date"] == d].drop(
@@ -268,25 +269,40 @@ def main(
                     y_hat = model.predict(X_val)
 
                     if len(y_val) > 1:
-                        # ic = rank_ic(y_val, y_hat)
                         ic = np.sqrt(mean_squared_error(y_val, y_hat))
                         if not np.isnan(ic):
                             ICs.append(ic)
 
                 if len(ICs) == 0:
-                    continue
+                    return None
 
                 score = np.mean(ICs)
 
+                logger.info(
+                    f"Loop finished for {model_name} / {hyperparams} "
+                    f"in: {round((time.time() - start_hyperparams) / 60, 4)} min"
+                )
+
+                return score, hyperparams
+
+            # =========================
+            # PARALLEL GRID SEARCH
+            # =========================
+            results = Parallel(n_jobs=-1)(
+                delayed(evaluate_hyperparams)(hyperparams)
+                for hyperparams in hyperparams_all_combinations[model_name]
+            )
+
+            best_score = -np.inf
+            best_hyperparams = None
+
+            for res in results:
+                if res is None:
+                    continue
+                score, hyperparams = res
                 if score > best_score:
                     best_score = score
                     best_hyperparams = hyperparams
-
-                logger.info(
-                    f"Loop finished for {model_name} / {hyperparams} "
-                    f"({nh + 1}/{len(hyperparams_all_combinations[model_name])}) "
-                    f"in: {round((time.time() - start_hyperparams) / 60, 4)} min"
-                )
 
             # -----------------------------
             # STORE VALIDATION RESULTS
