@@ -33,6 +33,7 @@ def main(
         models = {
             "ridge": Ridge,
             "lasso": Lasso,
+            "random_forest": RandomForestRegressor
         }
 
     # -------------------------
