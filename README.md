@@ -4,13 +4,14 @@
 
 ## Abstract
 
-Inspired by Alpha in Analysts (2025), we study the investment value of sell-side analyst price targets
+>Inspired by Alpha in Analysts (2025), we study the investment value of sell-side analyst price targets
 by treating each analyst as a portfolio manager and constructing long--short portfolios based on implied 12-month returns.
 Using a large panel of analyst-level portfolio returns, we predict one-month-ahead analyst performance in an expanding walk-forward framework.
 We compare linear models with modern machine learning methods, including tree-based ensembles and neural networks.
 While out-of-sample RMSE differences are modest across models, non-linear methods substantially outperform linear benchmarks
 in terms of Information Coefficient, indicating a superior ability to rank analysts by future performance.
 However, realized portfolio returns remain highly regime-dependent, highlighting the gap between predictive ranking power and investable alpha.
+
 ---
 
 ## Data
@@ -33,6 +34,7 @@ This project relies on two core datasets get through Wharton Research Data Servi
 
 Additional datasets may be used for features (analyst characteristics, broker information, 
 stock fundamentals).
+
 ---
 
 ## Framework methodology
@@ -48,9 +50,13 @@ $$
 We then build a **self-financing long–short portfolio** per analyst by splitting the coverage universe into positive and negative buckets:
 
 $$
-\mathcal{K}^{+}_{i,t}=\{k:\widehat{R}^{\,t+12}_{i,k}>0\}\quad\quad
-\mathcal{K}^{-}_{i,t}=\{k:\widehat{R}^{\,t+12}_{i,k}<0\}
+\mathcal{K}^{+}_{i,t}=
+\{k:\widehat{R}^{\,t+12}_{i,k}>0\}
+\quad\
+\mathcal{K}^{-}_{i,t}=
+\{k:\widehat{R}^{\,t+12}_{i,k}<0\}
 $$
+
 and defining bucket-normalized weights:
 
 $$
@@ -69,7 +75,7 @@ This yields an implied tradable book $\mathbf{w}_{i,t}$ per analyst.
 
 At each rebalancing month $m$, we compute analyst features $A_i^m$ from rolling windows (6M / 12M) and cross-sectional percentiles, then learn a mapping to future analyst performance:
 
-$$\mathrm{PnL}^{m+12}_i = g\!\left(A_i^m \mid \mathcal{F}_m\right).$$
+$$\mathrm{PnL}^{m+12}_i = g\left(A_i^m \mid \mathcal{F}_m\right).$$
 
 This is the supervised ML dataset: one row per (analyst, month), features at time $m$, target = forward analyst portfolio performance.
 
@@ -77,8 +83,9 @@ This is the supervised ML dataset: one row per (analyst, month), features at tim
 
 Given predicted forward performance $\widehat{\mathrm{PnL}}^{m+12}_i$, we allocate across analysts:
 
-$$\mathcal{I}_m^{+}=\{i:\widehat{\mathrm{PnL}}^{m+12}_i>0\},\qquad
-\mathcal{I}_m^{-}=\{i:\widehat{\mathrm{PnL}}^{m+12}_i<0\}.$$
+$$\mathcal{I}_m^{+}={\{i:\widehat{\mathrm{PnL}}^{m+12}_i>0\}},
+\qquad
+\mathcal{I}_m^{-}={\{i:\widehat{\mathrm{PnL}}^{m+12}_i<0\}}.$$
 
 Long/short meta-weights:
 
@@ -123,6 +130,7 @@ whereas simple linear specifications (OLS/Ridge) appear more stable and deliver 
 ![perf](outputs/figures/Perf_tableau.png "Metrics Table")
 
 Cumulative performance on the same out-of-sample period:
+
 ![perf_graph](outputs/figures/Cumul_perf_graph.png "Cumulative Performance")
 
 
