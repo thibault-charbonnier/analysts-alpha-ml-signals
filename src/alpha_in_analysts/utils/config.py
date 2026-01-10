@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 import json
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Config:
@@ -14,11 +16,11 @@ class Config:
             self.ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
         except NameError:
             self.ROOT_DIR = Path.cwd()
-        print("Root dir: " + str(self.ROOT_DIR))
+        logger.info("Root dir: " + str(self.ROOT_DIR))
         self.RUN_CONFIG_PATH = self.ROOT_DIR / "configs"/ "run_config.json"
-        print(" Run config path: " + str(self.RUN_CONFIG_PATH))
+        logger.info("Run config path: " + str(self.RUN_CONFIG_PATH))
         self.MODEL_CONFIG_PATH = self.ROOT_DIR / "configs"/ "ml_config.json"
-        print(" Model config path: " + str(self.MODEL_CONFIG_PATH))
+        logger.info("Model config path: " + str(self.MODEL_CONFIG_PATH))
 
         # Data path configurations
         self.target_price_path: str|None = None
@@ -34,6 +36,7 @@ class Config:
         self.transfo_k_neg: float = 12.0
         self.construction_method: str = "paper"
         self.normalize_weights: bool = False
+        self.pnl_transfo: bool = False
 
         # Model related configurations
         self.model_name: str|None = None
@@ -80,7 +83,6 @@ class Config:
         filepath : str
             Path to the JSON configuration file.
         """
-        print("Loading run config from:",filepath)
         with open(filepath, 'r') as f:
             config: dict = json.load(f)
             self.model_name = config.get('MODEL')
@@ -92,6 +94,7 @@ class Config:
             self.transfo_k_neg = config.get('PORTFOLIO').get('TRANSFO_K_NEG', 12.0)
             self.construction_method = config.get('PORTFOLIO').get('METHOD', "paper")
             self.normalize_weights = config.get('PORTFOLIO').get('NORMALIZE_WEIGHTS', False)
+            self.use_transfo = config.get('PORTFOLIO').get('USE_PREDICTION_TRANSFORMATION', False)
 
             self.start_date_features = config.get('FEATURES').get('START_DATE_FEATURES', "2002-01-31")
             self.lookback_perf = config.get('FEATURES').get('LOOKBACK_PERF', 12)

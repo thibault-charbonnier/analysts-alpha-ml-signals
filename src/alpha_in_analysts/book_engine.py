@@ -114,6 +114,11 @@ class BookEngine:
             )
 
         df_weights = self._compute_weights(df_decayed)
+        logger.info("\t\tBook length: %d positions", df_weights.height)
+        logger.info("\t\tNumber of analysts: %d", df_weights.select("analyst_id").n_unique())
+        logger.info("\t\tNumber of covered stocks: %d", df_weights.select("stock_id").n_unique())
+        logger.info("\t\tSum of absolute weights: %.4f", df_weights.select(pl.col("weight").abs().sum()).item())
+
         return (
             df_weights.join(self.df_metadata, on="symbol", how="left")
             if self.df_metadata is not None else df_weights

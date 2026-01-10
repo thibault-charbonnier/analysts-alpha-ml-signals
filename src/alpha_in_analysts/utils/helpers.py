@@ -2,6 +2,8 @@ import polars as pl
 from datetime import date, datetime, timedelta
 import pandas_market_calendars as mcal
 
+CALENDAR = mcal.get_calendar("NYSE")
+
 def _validate_date(dt: date | datetime | str) -> date:
     """
     Validate and convert input date to a valid date object.
@@ -36,7 +38,7 @@ def _last_trading_day_of_month(y: int, m: int) -> date:
     m2 = (m % 12) + 1
     end = date(y2, m2, 1) - timedelta(days=1)
 
-    sched = mcal.get_calendar("NYSE").schedule(start_date=start, end_date=end)
+    sched = CALENDAR.schedule(start_date=start, end_date=end)
     if sched.empty:
         raise ValueError(f"No trading days found for {y}-{m:02d} on calendar NYSE")
 

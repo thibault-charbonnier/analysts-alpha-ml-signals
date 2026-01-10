@@ -25,7 +25,8 @@ class MetaPortfolio:
             analyst_books: pl.DataFrame,
             predict_pnl: pl.DataFrame,
             method = "paper",
-            normalize: bool = False
+            normalize: bool = False,
+            use_transfo: bool = True
         ) -> pl.DataFrame:
         """
         Create a meta-portfolio with individual analyst books and their predicted PnL.
@@ -42,6 +43,12 @@ class MetaPortfolio:
         predict_pnl : pl.DataFrame
             Polars DataFrame containing the predicted 12-month forward PnL for each analyst.
             Expected columns: ['analyst_id', 'predicted_pnl']
+        method : str, default="paper"
+            Method to use for constructing the meta-portfolio. Options are 'paper' or 'aggregation
+        normalize : bool, default=False
+            Whether to normalize the final meta-portfolio weights so that the sum of absolute weights equals 1.0
+        use_transfo: bool, default=True
+            Whether to apply the credibility transformation to the predicted PnL before constructing the meta-portfolio
 
         Returns
         -------
@@ -49,8 +56,6 @@ class MetaPortfolio:
             Polars DataFrame containing the aggregated meta-portfolio weights.
             Columns: ['stock_id', 'meta_weight']
         """
-        logger.info("\t\tCreating meta-portfolio using method: %s", method)
-
         analyst_cols = ["analyst_id", "stock_id", "weight"]
         for col in analyst_cols:
             if col not in analyst_books.columns:
@@ -67,9 +72,9 @@ class MetaPortfolio:
             raise ValueError("Input DataFrames cannot be empty.")
         
         if method == "paper":
-            df = self._build_paper(analyst_books, predict_pnl)
+            df = self._build_paper(analyst_books, predict_pnl, use_transfo)
         elif method == "aggregation":
-            df = self._build_aggregation(analyst_books, predict_pnl)
+            df = self._build_aggregation(analyst_books, predict_pnl, use_transfo)
         else:
             raise ValueError("method parameter must be 'paper' or 'aggregation'")
 
@@ -81,7 +86,7 @@ class MetaPortfolio:
             
         return df
     
-    def _build_aggregation(self, analyst_books: pl.DataFrame, predict_pnl: pl.DataFrame) -> pl.DataFrame:
+    def _build_aggregation(self, analyst_books: pl.DataFrame, predict_pnl: pl.DataFrame, use_transfo: bool) -> pl.DataFrame:
         """
         Build the meta-portfolio using asset-level aggregation where the meta weight for each asset is:
             w_raw(k) = Σ_i c_i * w_{i,k}
@@ -102,19 +107,27 @@ class MetaPortfolio:
             Pre-validated with columns: ['analyst_id', 'stock_id', 'weight']
         predict_pnl : pl.DataFrame
             Pre-validated with columns: ['analyst_id', 'predicted_pnl']
-        
+        use_transfo : bool
+            Whether to apply the credibility transformation to the predicted PnL before constructing the meta-portfolio
+
         Returns
         -------
         pl.DataFrame
             Columns: ['stock_id', 'meta_weight']
         """
+        signal_expr = (
+            self._credibility(pl.col("predicted_pnl"), self.dead_zone, self.k_pos, self.k_neg)
+            if use_transfo
+            else pl.col("predicted_pnl")
+        )
+
         return (
             analyst_books
             .join(
                 predict_pnl, on="analyst_id", how="inner"
             )
             .with_columns(
-                self._credibility(pl.col("predicted_pnl"), self.dead_zone, self.k_pos, self.k_neg).alias("signal"),
+                signal_expr.alias("signal"),
             )
             .with_columns(
                 (pl.col("weight") * pl.col("signal")).alias("w_raw")
@@ -124,7 +137,7 @@ class MetaPortfolio:
             .select(["stock_id", "meta_weight"])
         )
 
-    def _build_paper(self, analyst_books: pl.DataFrame, predict_pnl: pl.DataFrame) -> pl.DataFrame:
+    def _build_paper(self, analyst_books: pl.DataFrame, predict_pnl: pl.DataFrame, use_transfo: bool) -> pl.DataFrame:
         """
         Build the meta-portfolio using analyst-portfolio-level as in the original paper:
 
@@ -143,16 +156,24 @@ class MetaPortfolio:
             Pre-validated with columns: ['analyst_id', 'stock_id', 'weight']
         predict_pnl : pl.DataFrame
             Pre-validated with columns: ['analyst_id', 'predicted_pnl']
-        
+        use_transfo : bool
+            Whether to apply the credibility transformation to the predicted PnL before constructing the meta-portfolio
+
         Returns
         -------
         pl.DataFrame
             Columns: ['stock_id', 'meta_weight']
         """
+        signal_expr = (
+            self._credibility(pl.col("predicted_pnl"), self.dead_zone, self.k_pos, self.k_neg)
+            if use_transfo
+            else pl.col("predicted_pnl")
+        )
+
         sig = (
             predict_pnl
             .with_columns(
-                self._credibility(pl.col("predicted_pnl"), self.dead_zone, self.k_pos, self.k_neg).alias("signal"),
+                signal_expr.alias("signal"),
             )
             .with_columns(
                 pl.when(pl.col("signal") > 0).then(pl.col("signal")).otherwise(0.0).alias("sig_pos"),
@@ -235,7 +256,8 @@ class MetaPortfolio:
             Polars columns containing the transformed credibility scores.
         """
         pos = 1 / (1 + (-k_pos * (x - dead_zone)).exp()) - 0.5
-        neg = (1 / (1 + (-k_neg * (-x - dead_zone)).exp()) + 0.5) - 1.0
+        neg = -(1 / (1 + (-k_neg * (-x - dead_zone)).exp()) - 0.5)
+
         return (
             pl.when(x.is_null()).then(0.0)
             .when(x > dead_zone).then(pos)

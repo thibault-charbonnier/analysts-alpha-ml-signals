@@ -1,13 +1,12 @@
 import polars as pl
 import logging
-from datetime import date
-
+from datetime import date, datetime
+import pandas as pd
 from .book_engine import BookEngine
-from .features_engine import FeaturesEngine
 from .model_wrappers.model_wrapper import ModelWrapper
 from .meta_portfolio import MetaPortfolio
 from .utils.config import Config
-from .utils.mapping import ModelType
+from .utils.mapping import map_model
 from .utils.helpers import _parse_date, _add_months, _month_range, _last_trading_day_of_month
 from .utils.s3_utils import s3Utils
 
@@ -48,38 +47,29 @@ class Backtester:
             Configuration object holding settings for the backtesting process.
         """
         self.config = config
-        self.model: ModelWrapper = None
         self.ptf: MetaPortfolio = MetaPortfolio(dead_zone=self.config.transfo_dead_zone,
                                                 k_pos=self.config.transfo_k_pos,
                                                 k_neg=self.config.transfo_k_neg)
-        self._load_model()
 
-    def run(self):
+    def run(self, models: list[str]):
         """
         Run the backtesting process as described in the class docstring.
+
+        Parameters
+        ----------
+        models : list[str]
+            List of model names to backtest.
         """
         logger.info("Starting backtesting process...")
         logger.info(f"Start Date: {self.config.test_start_date}, End Date: {self.config.test_end_date}")
+        logger.info("Models to backtest: " + ", ".join(models))
 
         timeline = self._build_timeline()
 
         df_tp, df_prices = self._load_data(start_date=_add_months(timeline[0], -1), end_date=timeline[-1])
+        oos_pred = self._load_pred()
 
-        weight_history: list[pl.DataFrame] = []
-
-        features_engine = FeaturesEngine(df_target_prices=df_tp,
-                                        df_prices=df_prices,
-                                        validity_length=self.config.validity_length,
-                                        decay_half_life=self.config.decay_halflife)
-        
-        res = features_engine.build_all_features(up_to_date=timeline[-1],
-                                                 lookback_perf_pct=12,
-                                                 lookback_perf=6,
-                                                 lookback_vol_pct=6,
-                                                 lookback_vol=6,
-                                                 lookback_mean_ret=6,
-                                                 drop_na=True)
-
+        weight_history: dict[str, list[pl.DataFrame]] = {model: [] for model in models}
         for t in timeline:
             logger.info(f"\tRunning backtest for date: {t}")
 
@@ -89,42 +79,136 @@ class Backtester:
                                 decay_half_life=self.config.decay_halflife
                                 ).at_snapshot(snapshot_date=t)
 
-            X_t: pl.DataFrame = res.filter(pl.col("date") == t).drop("date")
-            y_hat_t = (
-                X_t
-                .select("analyst_id")
-                .with_columns(pl.Series("predicted_pnl", self.model.predict(X=X_t)))
-            )
+            for model in models:
+                if model == "BENCHMARK":
+                    w_t = self._benchmark_from_book(book_t)
+                elif model  == "EQUAL_WEIGHTED":
+                    w_t = self.equal_weighted_analysts_ls(book_t)
+                else:
+                    y_hat_t = (
+                        oos_pred
+                        .filter(pl.col("date") == _add_months(t, -12))
+                        .filter(pl.col("model") == map_model.get(model))
+                        .with_columns((-pl.col("predicted_pnl")).alias("predicted_pnl"))
+                    )
+                    w_t = self.ptf.create_metaportfolio(
+                        analyst_books=book_t,
+                        predict_pnl=y_hat_t,
+                        method=self.config.construction_method,
+                        normalize=self.config.normalize_weights,
+                        use_transfo=self.config.pnl_transfo
+                    )
 
-            w_t = self.ptf.create_metaportfolio(
-                analyst_books=book_t,
-                predict_pnl=y_hat_t,
-                method=self.config.construction_method,
-                normalize=self.config.normalize_weights
-            )
-            w_t = w_t.with_columns(pl.lit(t).alias("date"))
-            weight_history.append(w_t)
+                w_t = self.force_50_50_ls(w_t, col="meta_weight")
+                stats = self.exposure_stats(w_t)
+                logger.info(f"\t\t[{model} @ {t}] gross={stats['gross']:.3f} net={stats['net']:.3f} "
+                            f"long={stats['long']:.3f} short={stats['short']:.3f}")
+
+                w_t = w_t.with_columns(pl.lit(t).alias("date"))
+                weight_history[model].append(w_t)
 
         logger.info("Backtesting process completed, analyzing results...")
 
-        self._analyst_backtest(ptf_weights=weight_history, prices=df_prices, timeline=timeline)
+        history = {}
+        for model in models:
+            df_res = self._analyst_backtest(ptf_weights=weight_history[model], prices=df_prices, timeline=timeline, model=model)
+            history[model] = df_res
 
+        combined = None
+        for model, df_res in history.items():
+            pdf = df_res.select(["date", "cumulative_ret"]).to_pandas()
+            pdf["date"] = pd.to_datetime(pdf["date"])
+            pdf = pdf.set_index("date").sort_index()
+            pdf = pdf.rename(columns={"cumulative_ret": model})
+            combined = pdf if combined is None else combined.join(pdf, how="outer")
+
+        out_path = f"outputs/backtest/backtest_cumulative_ret_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        with pd.ExcelWriter(out_path) as writer:
+            combined.to_excel(writer, sheet_name="cumulative_ret")
+
+        return combined
     # -----------------------------------------------------------------
     # |                       Private Helpers                         |
     # -----------------------------------------------------------------
 
-    def _load_model(self):
+    def force_50_50_ls(self, w: pl.DataFrame, col: str = "meta_weight") -> pl.DataFrame:
+        long_sum = w.filter(pl.col(col) > 0).select(pl.col(col).sum()).item() or 0.0
+        short_sum = w.filter(pl.col(col) < 0).select(pl.col(col).abs().sum()).item() or 0.0
+
+        # si un côté est vide -> on ne peut pas forcer un LS propre
+        if long_sum == 0.0 or short_sum == 0.0:
+            return w  # ou raise / fallback benchmark
+
+        return (
+            w.with_columns(
+                pl.when(pl.col(col) > 0)
+                .then(pl.col(col) * (0.5 / pl.lit(long_sum)))
+                .when(pl.col(col) < 0)
+                .then(pl.col(col) * (0.5 / pl.lit(short_sum)))
+                .otherwise(0.0)
+                .alias(col)
+            )
+        )
+
+    def exposure_stats(self, w: pl.DataFrame, col="meta_weight") -> dict:
+        net_ = w.select(pl.col(col).sum()).item()
+        gross_ = w.select(pl.col(col).abs().sum()).item()
+        long_ = w.filter(pl.col(col) > 0).select(pl.col(col).sum()).item()
+        short_ = -w.filter(pl.col(col) < 0).select(pl.col(col).sum()).item()
+        return {"net": net_, "gross": gross_, "long": long_, "short": short_}
+
+    def _benchmark_from_book(self, book_t: pl.DataFrame) -> pl.DataFrame:
         """
-        Load the trained model from disk using the ModelWrapper interface.
+        Create benchmark meta-portfolio from the given analyst book by equally weighting stocks.
         """
-        try:
-            self.model = ModelType[self.config.model_name].value()
-            self.model.load_model(model_path=self.config.model_paths.get('SKOPS'),
-                                  manifest_path=self.config.model_paths.get('MANIFEST'))
-            logger.info(f"Model {self.config.model_name} loaded successfully from disk.")
-        except Exception as e:
-            logger.error(f"Failed to load model {self.config.model_name}: {e}")
-        
+        w = (
+            book_t
+            .group_by("stock_id")
+            .agg(pl.col("weight").sum().alias("meta_weight"))
+        )
+        gross = w.select(pl.col("meta_weight").abs().sum()).item()
+        if gross == 0:
+            return w.with_columns(pl.lit(0.0).alias("meta_weight"))
+        return w.with_columns((pl.col("meta_weight") / pl.lit(gross)).alias("meta_weight"))
+
+    def equal_weighted_analysts_ls(self, book_t: pl.DataFrame) -> pl.DataFrame:
+        # 1) gross par analyste
+        gross_a = (
+            book_t
+            .group_by("analyst_id")
+            .agg(pl.col("weight").abs().sum().alias("gross"))
+        )
+
+        # 2) normalise chaque analyste (gross=1)
+        book_norm = (
+            book_t
+            .join(gross_a, on="analyst_id", how="left")
+            .with_columns(
+                pl.when(pl.col("gross") > 0)
+                .then(pl.col("weight") / pl.col("gross"))
+                .otherwise(0.0)
+                .alias("w_norm")
+            )
+        )
+
+        # 3) equal weight sur analystes = moyenne des books normalisés
+        n = gross_a.filter(pl.col("gross") > 0).height
+        ew = (
+            book_norm
+            .group_by("stock_id")
+            .agg(pl.col("w_norm").sum().alias("meta_weight"))
+        )
+
+        if n > 0:
+            ew = ew.with_columns((pl.col("meta_weight") / pl.lit(n)).alias("meta_weight"))
+
+        # 4) renormalise le meta-book final (gross=1) pour comparabilité
+        gross = ew.select(pl.col("meta_weight").abs().sum()).item()
+        if gross and gross > 0:
+            ew = ew.with_columns((pl.col("meta_weight") / pl.lit(gross)).alias("meta_weight"))
+
+        return ew.sort("stock_id")
+
     def _load_data(self, start_date: date = None, end_date: date = None) -> tuple[pl.DataFrame, pl.DataFrame]:
         """
         Load data from S3 using paths defined in the configuration.
@@ -150,7 +234,31 @@ class Backtester:
 
         logger.info(f"Data loaded from S3: Target Prices ({df_tp.shape}), Prices ({df_prices.shape})")
         return df_tp, df_prices
-    
+
+    def _load_pred(self):
+        """
+        Load the out-of-sample predictions from S3.
+
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame containing out-of-sample predictions with columns ['date', 'model', 'analyst_id', 'y_hat'].
+        """
+        obj = s3Utils.pull_file_from_s3(path="s3://alpha-in-analysts-storage/results/OOS_PRED.pkl", file_type="pickle")
+
+        df_y_hat = pd.concat(
+            {model: pd.concat(d_by_date, axis=1).T
+             for model, d_by_date in obj.items()},
+            names=["model", "date"]
+        )
+        df_long = (
+            df_y_hat.stack()
+            .rename("y_hat")
+            .reset_index()
+            .rename(columns={"level_2": "id"})
+        )
+        return pl.DataFrame(df_long).rename({"y_hat": "predicted_pnl"})
+
     def _build_timeline(self) -> list[date]:
         """
         Build the backtesting timeline based on the configuration.
@@ -224,7 +332,7 @@ class Backtester:
             .cast({"date": pl.Date})
         )
     
-    def _analyst_backtest(self, ptf_weights: list[pl.DataFrame], prices: pl.DataFrame, timeline: list[date]) -> pl.DataFrame:
+    def _analyst_backtest(self, ptf_weights: list[pl.DataFrame], prices: pl.DataFrame, timeline: list[date], model: str) -> pl.DataFrame:
         """
         Analyse the backtest performance of the meta-analyst portfolio strategy.
         Save the performance results to an Excel file.
@@ -237,6 +345,8 @@ class Backtester:
             DataFrame containing price data for the assets.
         timeline : list[date]
             List of dates corresponding to the backtest timeline.
+        model : str
+            Name of the model used for the backtest.
 
         Returns
         -------
@@ -259,10 +369,14 @@ class Backtester:
         )
         logger.info("Backtest performance analysis completed.")
 
-        # path = self.config.backtest_base_path + f"/backtest_{self.config.model_name}_{self.config.test_start_date}_{self.config.test_end_date}_{date.today()}.xlsx"
-        path2 = "outputs" + f"/backtest_{self.config.model_name}_{self.config.test_start_date}_{self.config.test_end_date}_{date.today()}.xlsx"
-        # perf.write_excel(path)
-        perf.write_excel(path2)
-        # logger.info(f"Backtest performance saved to {path}")
+        gross_return = (perf[-1, "cumulative_ret"] - 1) * 100
+        annualized_return = (perf[-1, "cumulative_ret"] ** (12 / len(timeline)) - 1) * 100
+        logger.info("---------------------------- Backtest Performance Summary ------------------------")
+        logger.info("Model: {}".format(model))
+        logger.info("Ptf Method: {}".format(self.config.construction_method))
+        logger.info("Date Range: {} to {}".format(timeline[0], timeline[-1]))
+        logger.info("Gross Return: {:.2f}%".format(gross_return))
+        logger.info("Annualized Return: {:.2f}%".format(annualized_return))
+        logger.info("----------------------------------------------------------------------------------")
 
         return perf
