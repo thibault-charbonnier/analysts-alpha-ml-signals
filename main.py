@@ -23,7 +23,9 @@ import sys
 from src.alpha_in_analysts.utils.s3_utils import s3Utils
 from src.alpha_in_analysts.features_engine import FeaturesEngine
 from src.alpha_in_analysts.utils.config import Config
-from src.alpha_in_analysts.backtester import Backtester
+from src.alpha_in_analysts.meta_backtest import Backtester
+from scripts.perf import compute_backtest_metrics_from_cumulative, plot_cumulative_perf, rolling_returns_boxplot
+
 config = Config()
 
 logging.basicConfig(
@@ -732,8 +734,16 @@ if __name__=="__main__":
         objs_loaded = load_ml_results_from_s3()
         get_analytics(objs_loaded=objs_loaded)
 
-        bt = Backtester(config=config)
-        bt.run()
+        all_models = ["RANDOM_FOREST", "RIDGE", "LASSO", "XGBOOST", "LIGHTGBM", "OLS", "BENCHMARK", "EQUAL_WEIGHTED"]
+
+        cfg = Config()
+        bt = Backtester(config=cfg)
+        df_res = bt.run(models=all_models)
+
+        rolling_returns_boxplot(df_res, window_years=3, periods_per_year=12, annualize=True, show_fliers=False)
+        plot_cumulative_perf(df_res, logy=False, title="Cumulative Performance")
+        compute_backtest_metrics_from_cumulative(df_res, periods_per_year=12, risk_free_rate=0.00, as_percent=True,
+                                                 round_digits=2)
 
         logger.info("--- End ---")
     else:

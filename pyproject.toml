@@ -8,23 +8,42 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+
     "boto3>=1.42.19",
+
     "dotenv>=0.9.9",
+
     "fsspec>=2021.7.0",
+
     "matplotlib>=3.10.7",
+
     "pandas-market-calendars>=5.2.3",
+
     "pandas>=2.3.3",
+
     "pandas-market-calendars>=5.2.3",
+
     "polars>=1.35.2",
+
     "pyarrow>=22.0.0",
+
     "rich>=14.2.0",
+
     "s3fs>=0.4.2",
+
     "skops>=0.13.0",
+
     "xlsxwriter>=3.2.9",
+
     "xgboost>=3.1.2",
+
     "lightgbm>=4.6.0",
+
     "urllib3==2.6.2",
+
     "dataframe-image>=0.2.7",
+
+    "openpyxl>=3.1.5",
 ]
 
 [build-system]

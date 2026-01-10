@@ -40,8 +40,8 @@
         },
         "TESTING":
         {
-            "START_DATE": "2019-01",
-            "END_DATE": "2024-12",
+            "START_DATE": "2006-02",
+            "END_DATE": "2020-02",
             "WARMUP_MONTHS": 12
         }
     },
@@ -56,6 +56,7 @@
         "TRANSFO_K_POS": 12.0,
         "TRANSFO_K_NEG": 12.0,
         "METHOD": "paper",
-        "NORMALIZE_WEIGHTS": false
+        "NORMALIZE_WEIGHTS": true,
+        "USE_PREDICTION_TRANSFORMATION": true
     }
 }

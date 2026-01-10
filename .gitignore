@@ -22,9 +22,6 @@ data/*
 sandbox.txt
 miscellanous
 
-outputs/figures/*
-!outputs/figures/.gitkeep
-
 outputs/logs/*
 !outputs/logs/.gitkeep
 
